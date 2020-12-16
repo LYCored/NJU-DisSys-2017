@@ -26,6 +26,9 @@ func TestInitialElection(t *testing.T) {
 
 	fmt.Printf("Test: initial election ...\n")
 
+	// 随机选取一个节点作为候选节点 TODO: 是否有问题？
+	candidate := cfg.pickRandServer()
+	cfg.electionTimeout(candidate)
 	// is a leader elected?
 	cfg.checkOneLeader()
 
@@ -47,15 +50,21 @@ func TestReElection(t *testing.T) {
 
 	fmt.Printf("Test: election after network failure ...\n")
 
+	// 随机选取一个节点作为候选节点 TODO: 是否有问题？
+	candidate := cfg.pickRandServer()
+	cfg.electionTimeout(candidate)
 	leader1 := cfg.checkOneLeader()
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
+	candidate = cfg.pickRandServer()
+	cfg.electionTimeout(candidate)
 	cfg.checkOneLeader()
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the old leader.
 	cfg.connect(leader1)
+	cfg.appendEntries(leader1, true)
 	leader2 := cfg.checkOneLeader()
 
 	// if there's no quorum, no leader should
@@ -63,14 +72,19 @@ func TestReElection(t *testing.T) {
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
+	candidate = cfg.pickRandServer()
+	cfg.electionTimeout(candidate)
 	cfg.checkNoLeader()
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
+	candidate = cfg.pickRandServer()
+	cfg.electionTimeout(candidate)
 	cfg.checkOneLeader()
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
+	cfg.appendEntries(leader2, true)
 	cfg.checkOneLeader()
 
 	fmt.Printf("  ... Passed\n")

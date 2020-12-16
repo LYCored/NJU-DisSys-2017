@@ -8,7 +8,10 @@ package raft
 // test with the original before submitting.
 //
 
-import "labrpc"
+import (
+	"labrpc"
+	"math/rand"
+)
 import "log"
 import "sync"
 import "testing"
@@ -397,11 +400,14 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
 					index = index1
+					cfg.appendEntries(starts, false) // My code
+					for i := 0; i < cfg.n; i++ {
+						cfg.logs[i][index] = cmd
+					}
 					break
 				}
 			}
 		}
-
 		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
@@ -419,8 +425,122 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 			}
 		} else {
 			time.Sleep(50 * time.Millisecond)
+			candidate := cfg.pickRandServer()
+			cfg.electionTimeout(candidate)
 		}
 	}
 	cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	return -1
+}
+
+// My code
+func (cfg *config) pickRandServer() int {
+	rand.Seed(time.Now().UnixNano())
+	servers := make([]int, 0)
+	for i := 0; i < cfg.n; i++ {
+		if cfg.connected[i] {
+			servers = append(servers, i)
+		}
+	}
+	candidateIndex := rand.Intn(len(servers))
+	return servers[candidateIndex]
+}
+
+func (cfg *config) electionTimeout(candidate int) {
+	validServers := 0
+	for i := 0; i < cfg.n; i++ {
+		if cfg.connected[i] {
+			validServers += 1
+			cfg.rafts[i].VotedFor = -1
+		}
+	}
+	if validServers == 1 {
+		cfg.rafts[candidate].LeaderFlag = false
+		return
+	}
+	cfg.rafts[candidate].CurrentTerm += 1
+	cfg.rafts[candidate].VotedFor = candidate
+	term := cfg.rafts[candidate].CurrentTerm
+	lastLogIndex := -1
+	lastLogTerm := -1
+	if len(cfg.rafts[candidate].Logs) > 0 {
+		lastLogIndex = len(cfg.rafts[candidate].Logs) - 1 // TODO:这个参数到底是什么意思，最后一个log项还是最后一个applied的log项
+		lastLogTerm = cfg.rafts[candidate].Logs[lastLogIndex].Term
+	}
+	requestVoteArgs := RequestVoteArgs{
+		Term:         term,
+		CandidateID:  candidate,
+		LastLogIndex: lastLogIndex,
+		LastLogTerm:  lastLogTerm,
+	}
+	voteCount := 1
+	for i := 0; i < cfg.n; i++ {
+		if cfg.connected[i] && i != candidate {
+			requestVoteReply := RequestVoteReply{}
+			result := cfg.rafts[candidate].sendRequestVote(i, requestVoteArgs, &requestVoteReply)
+			if result && requestVoteReply.VoteGranted {
+				voteCount += 1
+			}
+		}
+	}
+
+	if voteCount >= cfg.n/2+1 {
+		cfg.rafts[candidate].LeaderFlag = true
+		cfg.rafts[candidate].NextIndex = make([]int, cfg.n)
+		for i := 0; i < cfg.n; i++ {
+			cfg.rafts[candidate].NextIndex[i] = cfg.rafts[candidate].CommitIndex
+		}
+		cfg.rafts[candidate].MatchIndex = make([]int, cfg.n)
+		cfg.appendEntries(candidate, true)
+	}
+}
+
+func (cfg *config) appendEntries(leaderID int, isHeartbeat bool) {
+	for i := 0; i < cfg.n; i++ {
+		if cfg.connected[i] && i != leaderID {
+			for true {
+				term := cfg.rafts[leaderID].CurrentTerm
+				prevLogIndex := cfg.rafts[leaderID].NextIndex[i] - 1
+				prevLogTerm := -1
+				if prevLogIndex >= 0 {
+					prevLogTerm = cfg.rafts[leaderID].Logs[prevLogIndex].Term
+				}
+				leaderCommitIndex := cfg.rafts[leaderID].CommitIndex
+				entries := make([]Log, 0)
+				if !isHeartbeat {
+					for j := leaderCommitIndex - 1; j >= cfg.rafts[leaderID].NextIndex[i] && j >= 0; j -= 1 {
+						entries = append(entries, cfg.rafts[leaderID].Logs[j])
+					}
+				}
+				appendEntriesArgs := AppendEntriesArgs{
+					Term:         term,
+					LeaderID:     leaderID,
+					PrevLogIndex: prevLogIndex,
+					PrevLogTerm:  prevLogTerm,
+					Entries:      entries,
+					LeaderCommit: leaderCommitIndex,
+				}
+				appendEntriesReply := AppendEntriesReply{}
+				result := cfg.rafts[leaderID].sendAppendEntries(i, appendEntriesArgs, &appendEntriesReply)
+				if isHeartbeat {
+					if result && !appendEntriesReply.Success {
+						cfg.rafts[leaderID].LeaderFlag = false
+						//cfg.rafts[leaderID].CurrentTerm = appendEntriesReply.Term // 在旧Leader连回网络时会导致错误
+					}
+					break
+				} else {
+					if result && !appendEntriesReply.Success {
+						if cfg.rafts[leaderID].CurrentTerm < appendEntriesReply.Term {
+							cfg.rafts[leaderID].LeaderFlag = false
+							//cfg.rafts[leaderID].CurrentTerm = appendEntriesReply.Term
+						} else {
+							cfg.rafts[leaderID].NextIndex[i] -= 1
+						}
+					} else {
+						break
+					}
+				}
+			}
+		}
+	}
 }
