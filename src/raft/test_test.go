@@ -26,10 +26,11 @@ func TestInitialElection(t *testing.T) {
 
 	fmt.Printf("Test: initial election ...\n")
 
-	// 随机选取一个节点作为候选节点 TODO: 是否有问题？
-	candidate := cfg.pickRandServer()
-	cfg.electionTimeout(candidate)
-	// is a leader elected?
+	cfg.StartElection()
+	//candidate := cfg.pickRandServer()
+	//validServers := cfg.getValidServers()
+	//cfg.electionTimeout(candidate, validServers)
+	//is a leader elected?
 	cfg.checkOneLeader()
 
 	// does the leader+term stay the same there is no failure?
@@ -50,15 +51,18 @@ func TestReElection(t *testing.T) {
 
 	fmt.Printf("Test: election after network failure ...\n")
 
-	// 随机选取一个节点作为候选节点 TODO: 是否有问题？
-	candidate := cfg.pickRandServer()
-	cfg.electionTimeout(candidate)
+	cfg.StartElection()
+	//candidate := cfg.pickRandServer()
+	//validServers := cfg.getValidServers()
+	//cfg.electionTimeout(candidate, validServers)
 	leader1 := cfg.checkOneLeader()
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
-	candidate = cfg.pickRandServer()
-	cfg.electionTimeout(candidate)
+	cfg.StartElection()
+	//candidate = cfg.pickRandServer()
+	//validServers = cfg.getValidServers()
+	//cfg.electionTimeout(candidate, validServers)
 	cfg.checkOneLeader()
 
 	// if the old leader rejoins, that shouldn't
@@ -72,14 +76,18 @@ func TestReElection(t *testing.T) {
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
-	candidate = cfg.pickRandServer()
-	cfg.electionTimeout(candidate)
+	cfg.StartElection()
+	//candidate = cfg.pickRandServer()
+	//validServers = cfg.getValidServers()
+	//cfg.electionTimeout(candidate, validServers)
 	cfg.checkNoLeader()
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
-	candidate = cfg.pickRandServer()
-	cfg.electionTimeout(candidate)
+	cfg.StartElection()
+	//candidate = cfg.pickRandServer()
+	//validServers = cfg.getValidServers()
+	//cfg.electionTimeout(candidate, validServers)
 	cfg.checkOneLeader()
 
 	// re-join of last node shouldn't prevent leader from existing.
@@ -96,6 +104,8 @@ func TestBasicAgree(t *testing.T) {
 	defer cfg.cleanup()
 
 	fmt.Printf("Test: basic agreement ...\n")
+
+	cfg.StartElection()
 
 	iters := 3
 	for index := 1; index < iters+1; index++ {
@@ -119,6 +129,8 @@ func TestFailAgree(t *testing.T) {
 	defer cfg.cleanup()
 
 	fmt.Printf("Test: agreement despite follower failure ...\n")
+
+	cfg.StartElection()
 
 	cfg.one(101, servers)
 
@@ -150,6 +162,8 @@ func TestFailNoAgree(t *testing.T) {
 	defer cfg.cleanup()
 
 	fmt.Printf("Test: no agreement if too many followers fail ...\n")
+
+	cfg.StartElection()
 
 	cfg.one(10, servers)
 
@@ -204,6 +218,9 @@ func TestConcurrentStarts(t *testing.T) {
 	fmt.Printf("Test: concurrent Start()s ...\n")
 
 	var success bool
+
+	// My code
+	cfg.StartElection()
 loop:
 	for try := 0; try < 5; try++ {
 		if try > 0 {
@@ -232,7 +249,7 @@ loop:
 				if ok != true {
 					return
 				}
-				is <- i
+				is <- i - 1 // My changed code
 			}(ii)
 		}
 
@@ -245,6 +262,9 @@ loop:
 				continue loop
 			}
 		}
+
+		cfg.appendEntries(leader, false)
+		cfg.ApplyToStateMachine()
 
 		failed := false
 		cmds := []int{}
@@ -304,11 +324,15 @@ func TestRejoin(t *testing.T) {
 
 	fmt.Printf("Test: rejoin of partitioned leader ...\n")
 
+	cfg.StartElection()
+
 	cfg.one(101, servers)
 
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
+
+	cfg.StartElection()
 
 	// make old leader try to agree on some entries
 	cfg.rafts[leader1].Start(102)
@@ -324,11 +348,14 @@ func TestRejoin(t *testing.T) {
 
 	// old leader connected again
 	cfg.connect(leader1)
+	cfg.appendEntries(leader1, true) // My code
+	cfg.StartElection()
 
 	cfg.one(104, 2)
 
 	// all together now
 	cfg.connect(leader2)
+	cfg.appendEntries(leader2, true) // My code
 
 	cfg.one(105, servers)
 
@@ -342,6 +369,8 @@ func TestBackup(t *testing.T) {
 
 	fmt.Printf("Test: leader backs up quickly over incorrect follower logs ...\n")
 
+	cfg.StartElection()
+
 	cfg.one(rand.Int(), servers)
 
 	// put leader and one follower in a partition
@@ -354,6 +383,7 @@ func TestBackup(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader1].Start(rand.Int())
 	}
+	cfg.appendEntries(leader1, false)
 
 	time.Sleep(RaftElectionTimeout / 2)
 
@@ -365,6 +395,8 @@ func TestBackup(t *testing.T) {
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
 
+	cfg.StartElection()
+
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3)
@@ -372,6 +404,7 @@ func TestBackup(t *testing.T) {
 
 	// now another partitioned leader and one follower
 	leader2 := cfg.checkOneLeader()
+	cfg.appendEntries(leader2, false) // My code
 	other := (leader1 + 2) % servers
 	if leader2 == other {
 		other = (leader2 + 1) % servers
@@ -382,6 +415,7 @@ func TestBackup(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader2].Start(rand.Int())
 	}
+	cfg.appendEntries(leader2, false)
 
 	time.Sleep(RaftElectionTimeout / 2)
 
@@ -392,6 +426,9 @@ func TestBackup(t *testing.T) {
 	cfg.connect((leader1 + 0) % servers)
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
+
+	cfg.appendEntries(leader1, false)
+	cfg.StartElection()
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
@@ -413,6 +450,8 @@ func TestCount(t *testing.T) {
 	defer cfg.cleanup()
 
 	fmt.Printf("Test: RPC counts aren't too high ...\n")
+
+	cfg.StartElection()
 
 	rpcs := func() (n int) {
 		for j := 0; j < servers; j++ {
@@ -465,9 +504,12 @@ loop:
 			}
 		}
 
+		cfg.appendEntries(leader, false)
+		cfg.ApplyToStateMachine()
+
 		for i := 1; i < iters+1; i++ {
 			cmd := cfg.wait(starti+i, servers, term)
-			if ix, ok := cmd.(int); ok == false || ix != cmds[i-1] {
+			if ix, ok := cmd.(int); ok == false || ix != cmds[i] {
 				if ix == -1 {
 					// term changed -- try again
 					continue loop

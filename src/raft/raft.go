@@ -209,6 +209,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 				reply.Success = false
 			} else {
 				rf.Logs = append(rf.Logs[:args.PrevLogIndex+1], args.Entries...)
+				rf.CommitIndex = len(rf.Logs)
 			}
 		}
 	}
@@ -234,14 +235,12 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *App
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	if rf.LeaderFlag {
-		entry := Log{
-			Term:    rf.CurrentTerm,
-			Command: command,
-		}
-		rf.Logs = append(rf.Logs, entry)
-		rf.CommitIndex += 1
+	entry := Log{
+		Term:    rf.CurrentTerm,
+		Command: command,
 	}
+	rf.Logs = append(rf.Logs, entry)
+	rf.CommitIndex += 1
 	index := rf.CommitIndex
 	term := rf.CurrentTerm
 	isLeader := rf.LeaderFlag

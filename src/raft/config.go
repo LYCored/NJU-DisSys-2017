@@ -22,6 +22,8 @@ import "sync/atomic"
 import "time"
 import "fmt"
 
+const WaitingBeforeElection = 1000 * time.Millisecond
+
 func randstring(n int) string {
 	b := make([]byte, 2*n)
 	crand.Read(b)
@@ -425,12 +427,60 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 			}
 		} else {
 			time.Sleep(50 * time.Millisecond)
-			candidate := cfg.pickRandServer()
-			cfg.electionTimeout(candidate)
 		}
 	}
 	cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	return -1
+}
+
+// My code
+func (cfg *config) getValidServers() int {
+	validServers := 0
+	for i := 0; i < cfg.n; i++ {
+		if cfg.connected[i] {
+			validServers += 1
+			cfg.rafts[i].VotedFor = -1
+		}
+	}
+	return validServers
+}
+
+// My code
+func (cfg *config) StartElection() {
+	validServers := cfg.getValidServers()
+	if validServers == 1 {
+		return
+	}
+	waitTime := make([]int64, 0)
+	rand.Seed(time.Now().UnixNano())
+	for i := 0; i < cfg.n; i++ {
+		wt := rand.Int63n(int64(cfg.n)) + 1
+		waitTime = append(waitTime, wt)
+	}
+	var wg sync.WaitGroup
+	wg.Add(cfg.n)
+	for i := 0; i < cfg.n; i++ {
+		go func(ii int) {
+			if cfg.connected[ii] {
+				time.Sleep(time.Duration(waitTime[ii]) * WaitingBeforeElection)
+				cfg.electionTimeout(ii, validServers)
+			}
+			defer wg.Done()
+		}(i)
+	}
+	wg.Wait()
+	haveLeader := false
+	for i := 0; i < cfg.n; i++ {
+		if cfg.connected[i] {
+			_, leaderFlag := cfg.rafts[i].GetState()
+			if leaderFlag {
+				haveLeader = true
+			}
+		}
+	}
+	if !haveLeader {
+		cfg.StartElection()
+	}
 }
 
 // My code
@@ -446,16 +496,12 @@ func (cfg *config) pickRandServer() int {
 	return servers[candidateIndex]
 }
 
-func (cfg *config) electionTimeout(candidate int) {
-	validServers := 0
-	for i := 0; i < cfg.n; i++ {
-		if cfg.connected[i] {
-			validServers += 1
-			cfg.rafts[i].VotedFor = -1
-		}
-	}
+func (cfg *config) electionTimeout(candidate int, validServers int) {
 	if validServers == 1 {
 		cfg.rafts[candidate].LeaderFlag = false
+		return
+	}
+	if cfg.rafts[candidate].VotedFor != -1 {
 		return
 	}
 	cfg.rafts[candidate].CurrentTerm += 1
@@ -484,7 +530,7 @@ func (cfg *config) electionTimeout(candidate int) {
 		}
 	}
 
-	if voteCount >= cfg.n/2+1 {
+	if voteCount >= validServers/2+1 {
 		cfg.rafts[candidate].LeaderFlag = true
 		cfg.rafts[candidate].NextIndex = make([]int, cfg.n)
 		for i := 0; i < cfg.n; i++ {
@@ -496,50 +542,67 @@ func (cfg *config) electionTimeout(candidate int) {
 }
 
 func (cfg *config) appendEntries(leaderID int, isHeartbeat bool) {
+	var wg sync.WaitGroup
+	wg.Add(cfg.n)
 	for i := 0; i < cfg.n; i++ {
-		if cfg.connected[i] && i != leaderID {
-			for true {
-				term := cfg.rafts[leaderID].CurrentTerm
-				prevLogIndex := cfg.rafts[leaderID].NextIndex[i] - 1
-				prevLogTerm := -1
-				if prevLogIndex >= 0 {
-					prevLogTerm = cfg.rafts[leaderID].Logs[prevLogIndex].Term
-				}
-				leaderCommitIndex := cfg.rafts[leaderID].CommitIndex
-				entries := make([]Log, 0)
-				if !isHeartbeat {
-					for j := leaderCommitIndex - 1; j >= cfg.rafts[leaderID].NextIndex[i] && j >= 0; j -= 1 {
-						entries = append(entries, cfg.rafts[leaderID].Logs[j])
+		go func(ii int) {
+			if cfg.connected[ii] && ii != leaderID {
+				for true {
+					term := cfg.rafts[leaderID].CurrentTerm
+					prevLogIndex := cfg.rafts[leaderID].NextIndex[ii] - 1
+					prevLogTerm := -1
+					if prevLogIndex >= 0 {
+						prevLogTerm = cfg.rafts[leaderID].Logs[prevLogIndex].Term
 					}
-				}
-				appendEntriesArgs := AppendEntriesArgs{
-					Term:         term,
-					LeaderID:     leaderID,
-					PrevLogIndex: prevLogIndex,
-					PrevLogTerm:  prevLogTerm,
-					Entries:      entries,
-					LeaderCommit: leaderCommitIndex,
-				}
-				appendEntriesReply := AppendEntriesReply{}
-				result := cfg.rafts[leaderID].sendAppendEntries(i, appendEntriesArgs, &appendEntriesReply)
-				if isHeartbeat {
-					if result && !appendEntriesReply.Success {
-						cfg.rafts[leaderID].LeaderFlag = false
-						//cfg.rafts[leaderID].CurrentTerm = appendEntriesReply.Term // 在旧Leader连回网络时会导致错误
-					}
-					break
-				} else {
-					if result && !appendEntriesReply.Success {
-						if cfg.rafts[leaderID].CurrentTerm < appendEntriesReply.Term {
-							cfg.rafts[leaderID].LeaderFlag = false
-							//cfg.rafts[leaderID].CurrentTerm = appendEntriesReply.Term
-						} else {
-							cfg.rafts[leaderID].NextIndex[i] -= 1
+					leaderCommitIndex := cfg.rafts[leaderID].CommitIndex
+					entries := make([]Log, 0)
+					if !isHeartbeat {
+						for j := cfg.rafts[leaderID].NextIndex[ii]; j < leaderCommitIndex; j++ {
+							entries = append(entries, cfg.rafts[leaderID].Logs[j])
 						}
-					} else {
+					}
+					appendEntriesArgs := AppendEntriesArgs{
+						Term:         term,
+						LeaderID:     leaderID,
+						PrevLogIndex: prevLogIndex,
+						PrevLogTerm:  prevLogTerm,
+						Entries:      entries,
+						LeaderCommit: leaderCommitIndex,
+					}
+					appendEntriesReply := AppendEntriesReply{}
+					result := cfg.rafts[leaderID].sendAppendEntries(ii, appendEntriesArgs, &appendEntriesReply)
+					if isHeartbeat {
+						if result && !appendEntriesReply.Success {
+							cfg.rafts[leaderID].LeaderFlag = false
+							cfg.rafts[leaderID].CurrentTerm = appendEntriesReply.Term // 在旧Leader连回网络时会导致错误
+						}
 						break
+					} else {
+						if result && !appendEntriesReply.Success {
+							if cfg.rafts[leaderID].CurrentTerm < appendEntriesReply.Term {
+								cfg.rafts[leaderID].LeaderFlag = false
+								cfg.rafts[leaderID].CurrentTerm = appendEntriesReply.Term
+							} else {
+								cfg.rafts[leaderID].NextIndex[ii] -= 1
+							}
+						} else {
+							break
+						}
 					}
 				}
+			}
+			defer wg.Done()
+		}(i)
+	}
+	wg.Wait()
+}
+
+func (cfg *config) ApplyToStateMachine() {
+	for i := 0; i < cfg.n; i++ {
+		if cfg.connected[i] {
+			for cfg.rafts[i].LastApplied != cfg.rafts[i].CommitIndex {
+				cfg.logs[i][cfg.rafts[i].LastApplied] = cfg.rafts[i].Logs[cfg.rafts[i].LastApplied].Command.(int)
+				cfg.rafts[i].LastApplied++
 			}
 		}
 	}
